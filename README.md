@@ -155,6 +155,7 @@ As regras operam sobre os dados coletados e geram os sinais de alerta.
 uv run elosys rule-disproportionate-expense --db elosys.db
 uv run elosys rule-circular-donations       --db elosys.db   # cerca de 25 min na base completa
 uv run elosys candidate-supplier-partner    --db elosys.db   # requer receita-cnpj (quadro societário)
+uv run elosys rule-shell-supplier           --db elosys.db   # requer receita-cnpj (data de abertura, situação, capital)
 ```
 
 ### Etapa 5: análises complementares com LLM e X (opcional)
@@ -225,6 +226,25 @@ O TSE não publica a quantidade adquirida, apenas o valor total; por isso a regr
 Constrói um grafo dirigido sobre toda a base (doador → candidato, candidato → fornecedor) e utiliza o algoritmo de Tarjan para componentes fortemente conexos, combinado com busca em profundidade limitada (padrão de 5 nós), para localizar ciclos em que recursos saem de uma campanha e retornam à mesma cadeia.
 
 Na base completa, o grafo possui 5,35 milhões de nós e 7,66 milhões de arestas. Foram encontrados 108.400 ciclos; destes, 38.267 movimentaram mais de R$ 10.000 e foram registrados como sinais (10.705 de severidade alta, com até 3 nós, e 27.562 de severidade média). A página `/sinais/doacao-circular` permite filtrar por severidade, ordenar por valor ou comprimento do ciclo e acessar o grafo interativo. Ciclos podem ter explicações legítimas, como coligações ou ressarcimentos, e exigem verificação individual.
+
+### Empresa de fachada (`shell_supplier`)
+
+Cruza os dados cadastrais da Receita Federal de cada fornecedor com as datas e os valores que ele recebeu de campanhas. Gera três tipos de sinal:
+
+| Sinal | Severidade | Condição |
+|---|---|---|
+| `paid_before_company_opened` | `high` | Despesa com data anterior ao início de atividade da empresa |
+| `paid_after_company_inactive` | `high` | Despesa posterior à data em que a empresa ficou baixada, inapta, suspensa ou nula |
+| `new_company_low_capital_high_value` | `medium` | Primeiro pagamento até 180 dias após a abertura, total recebido de R$ 50 mil ou mais e capital social de até R$ 10 mil |
+
+Cada condição de "empresa nova", "valor alto" e "capital baixo" isolada não gera sinal, porque produziria muitos falsos positivos: muitas empresas legítimas são abertas perto da eleição ou operam com capital baixo. Capital social desconhecido nunca é tratado como baixo. A data comparada é a da despesa (`campaign_expense.expense_date`). Ficam de fora os fornecedores que são CNPJs de outras campanhas (repasses entre campanhas) e os órgãos de partidos políticos. Cada sinal referencia as maiores despesas (até 20) como evidência, e o texto traz a contagem completa.
+
+Na base completa, a regra gerou 537 sinais: 46 de pagamento antes da abertura (R$ 5,3 milhões), 37 de pagamento após inatividade (R$ 2,6 milhões) e 454 de empresa nova com capital baixo e valor alto (R$ 223,7 milhões). A página `/sinais/empresa-de-fachada` lista os sinais, com filtro por tipo, busca por empresa, CNPJ ou candidato, e ordenação por severidade e valor. Os sinais também aparecem no perfil de cada candidato envolvido.
+
+**Limitações.**
+- A regra só avalia fornecedores presentes em `company_registry`, que é preenchida de forma incremental por `receita-cnpj`. Hoje são cerca de 16,6 mil fornecedores (4% do total, mas 71% do valor pago). A cauda de fornecedores pequenos, onde empresas de fachada costumam estar, ainda não é coberta.
+- Datas cadastrais podem estar erradas e um CNPJ pode ser reaproveitado, então "pago antes da abertura" pode ser erro de dado. Os maiores casos de empresa nova com capital baixo incluem sociedades de propósito específico (SPE) criadas por agências para uma campanha, prática comum e legítima que também merece conferência.
+- A situação cadastral é a do momento da coleta na Receita.
 
 ### Sócio fornecedor (`candidate_supplier_partner`)
 

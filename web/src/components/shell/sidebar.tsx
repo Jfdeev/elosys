@@ -21,6 +21,7 @@ export function Sidebar({ counts }: { counts: SidebarCounts }) {
     { href: "/sinais/doacao-circular", label: "Doação circular", count: counts.circularDonations, alert: true },
     { href: "/sinais/despesa-desproporcional", label: "Despesa desproporcional", count: counts.disproportionateExpense },
     { href: "/sinais/socio-fornecedor", label: "Sócio de fornecedor", count: counts.supplierPartner },
+    { href: "/sinais/empresa-de-fachada", label: "Empresa de fachada", count: counts.shellSupplier },
     { href: "/sinais/analise-ia", label: "Análise de IA", count: counts.aiReview },
     { href: "/sinais/discurso", label: "Discurso em rede social", count: counts.discourse, alert: true },
   ];

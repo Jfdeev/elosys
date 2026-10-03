@@ -2369,6 +2369,121 @@ export function getSupplierPartners(opts: {
   }));
 }
 
+// Keep in sync with the signal types in elosys/rules/shell_supplier.py
+export const SHELL_SUPPLIER_TYPES = [
+  "paid_before_company_opened",
+  "paid_after_company_inactive",
+  "new_company_low_capital_high_value",
+] as const;
+export type ShellSupplierType = (typeof SHELL_SUPPLIER_TYPES)[number];
+export type ShellSupplierFilter = "all" | ShellSupplierType;
+
+export type ShellSupplierRow = {
+  signalId: number;
+  type: ShellSupplierType;
+  severity: "low" | "medium" | "high";
+  explanation: string;
+  amountCents: number;
+  companyCnpj: string;
+  companyName: string | null;
+  candidates: Array<{ personId: number; name: string | null }>;
+};
+
+export function getShellSupplierSummary(): { total: number; byType: Record<ShellSupplierType, number> } {
+  const byType = Object.fromEntries(SHELL_SUPPLIER_TYPES.map((t) => [t, 0])) as Record<ShellSupplierType, number>;
+  const rows = db()
+    .prepare(
+      `SELECT s.type AS type, count(*) AS n
+       FROM signal s JOIN rule_run rr ON rr.id = s.rule_run_id
+       WHERE rr.rule = 'shell_supplier'
+       GROUP BY s.type`
+    )
+    .all() as Array<{ type: ShellSupplierType; n: number }>;
+  for (const r of rows) if (r.type in byType) byType[r.type] = r.n;
+  return { total: Object.values(byType).reduce((a, b) => a + b, 0), byType };
+}
+
+const SHELL_SUPPLIER_FROM = `
+  FROM signal s
+  JOIN rule_run rr ON rr.id = s.rule_run_id AND rr.rule = 'shell_supplier'
+  JOIN signal_actor sc ON sc.signal_id = s.id AND sc.type = 'company' AND sc.role = 'supplier'
+  JOIN companies c ON c.id = sc.actor_id
+  LEFT JOIN company_registry cr ON cr.company_id = c.id`;
+
+function shellSupplierWhere(opts: { type?: ShellSupplierFilter; q?: string }): { where: string; args: unknown[] } {
+  const clauses: string[] = [];
+  const args: unknown[] = [];
+  if (opts.type && opts.type !== "all") {
+    clauses.push("s.type = ?");
+    args.push(opts.type);
+  }
+  const q = opts.q?.trim();
+  if (q) {
+    const digits = q.replace(/\D/g, "");
+    clauses.push(
+      `(coalesce(cr.legal_name, c.legal_name) LIKE ?
+        ${digits ? "OR c.cnpj LIKE ?" : ""}
+        OR EXISTS (SELECT 1 FROM signal_actor sa JOIN people p ON p.id = sa.actor_id
+                   WHERE sa.signal_id = s.id AND sa.type = 'person' AND p.canonical_name LIKE ?))`
+    );
+    args.push(`%${q}%`);
+    if (digits) args.push(`%${digits}%`);
+    args.push(`%${normalizeName(q)}%`);
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", args };
+}
+
+export function getShellSupplierCount(opts: { type?: ShellSupplierFilter; q?: string }): number {
+  const { where, args } = shellSupplierWhere(opts);
+  return (
+    db().prepare(`SELECT count(*) AS n ${SHELL_SUPPLIER_FROM} ${where}`).get(...args) as { n: number }
+  ).n;
+}
+
+export function getShellSuppliers(opts: {
+  type?: ShellSupplierFilter;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): ShellSupplierRow[] {
+  const { where, args } = shellSupplierWhere(opts);
+  const rows = db()
+    .prepare(
+      `SELECT s.id AS signalId, s.type AS type, s.severity AS severity, s.explanation AS explanation,
+              coalesce(s.amount_cents, 0) AS amountCents, c.cnpj AS companyCnpj,
+              coalesce(cr.legal_name, c.legal_name) AS companyName,
+              (SELECT json_group_array(json_object('personId', p.id, 'name', p.canonical_name))
+                 FROM signal_actor sa JOIN people p ON p.id = sa.actor_id
+                WHERE sa.signal_id = s.id AND sa.type = 'person' AND sa.role = 'candidate') AS candidates
+       ${SHELL_SUPPLIER_FROM}
+       ${where}
+       ORDER BY CASE s.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                coalesce(s.amount_cents, 0) DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...args, opts.limit ?? 40, opts.offset ?? 0) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    signalId: r.signalId as number,
+    type: r.type as ShellSupplierType,
+    severity: r.severity as ShellSupplierRow["severity"],
+    explanation: r.explanation as string,
+    amountCents: r.amountCents as number,
+    companyCnpj: r.companyCnpj as string,
+    companyName: (r.companyName as string) ?? null,
+    candidates: parseShellSupplierCandidates(r.candidates as string | null),
+  }));
+}
+
+function parseShellSupplierCandidates(json: string | null): ShellSupplierRow["candidates"] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as ShellSupplierRow["candidates"]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export const DISCOURSE_GROUP_CATEGORIES = [
   "lgbtfobia", "racismo", "misoginia", "capacitismo", "xenofobia", "regionalismo",
   "aporofobia", "gordofobia", "antissemitismo", "intolerancia_religiosa", "etarismo_saude",

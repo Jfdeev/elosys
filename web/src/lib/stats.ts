@@ -5,6 +5,7 @@ import {
   getAiReviewSummary,
   getDiscourseSummary,
   getDisproportionateExpenseCount,
+  getShellSupplierSummary,
 } from "./queries";
 
 export type HomeStats = {
@@ -55,6 +56,7 @@ export type SidebarCounts = {
   aiReview: number;
   discourse: number;
   disproportionateExpense: number;
+  shellSupplier: number;
 };
 
 let cachedCounts: SidebarCounts | null = null;
@@ -67,6 +69,7 @@ export function getSidebarCounts(): SidebarCounts {
     aiReview: getAiReviewSummary().total,
     discourse: getDiscourseSummary().total,
     disproportionateExpense: getDisproportionateExpenseCount(),
+    shellSupplier: getShellSupplierSummary().total,
   };
   return cachedCounts;
 }
