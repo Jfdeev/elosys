@@ -1,0 +1,13 @@
+{
+  "rule_run_id": 6,
+  "signals": 537,
+  "by_type": {
+    "new_company_low_capital_high_value": 454,
+    "paid_after_company_inactive": 37,
+    "paid_before_company_opened": 46
+  },
+  "by_severity": {
+    "high": 83,
+    "medium": 454
+  }
+}

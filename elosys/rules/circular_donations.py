@@ -11,6 +11,7 @@ from collections import defaultdict
 from ..db import connect, create_schema
 from ..log import RowCounter, get_logger, step
 from ..util import git_commit, now_utc
+from .common import reset_rule_signals
 
 log = get_logger("elosys.rules.circular_donations")
 
@@ -207,7 +208,7 @@ def run(con: sqlite3.Connection, *, max_depth: int = DEFAULT_MAX_DEPTH,
         max_fanout: int = DEFAULT_MAX_FANOUT,
         min_amount_cents: int = DEFAULT_MIN_AMOUNT_CENTS) -> dict:
     with step(log, "reset circular_donations signals"):
-        _reset(con)
+        reset_rule_signals(con, RULE_NAME)
 
     id_to_node, adj, edge_kind, edge_amount = _build_graph(con)
     n = len(id_to_node)
@@ -391,30 +392,6 @@ def _write_cycle_signal(
         evidence,
     )
     return 1
-
-
-def _reset(con: sqlite3.Connection) -> None:
-    con.execute(
-        "DELETE FROM signal_evidence WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal_actor WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal_ai_review WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal WHERE rule_run_id IN (SELECT id FROM rule_run WHERE rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute("DELETE FROM rule_run WHERE rule = ?", (RULE_NAME,))
-    con.commit()
 
 
 def _main(argv: list[str] | None = None) -> int:

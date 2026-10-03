@@ -17,6 +17,7 @@ from .rules import (
     candidate_supplier_partner,
     circular_donations,
     disproportionate_expense,
+    shell_supplier,
     social_review,
 )
 from .social import x_posts
@@ -298,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     for cmd, mod, name, helptext in (
         ("rule-disproportionate-expense", disproportionate_expense, "rule_disproportionate_expense",
          "flag campaign_expense rows: cheap-sounding item, disproportionate value"),
+        ("rule-shell-supplier", shell_supplier, "rule_shell_supplier",
+         "flag suppliers whose registry data does not fit the payments received (needs receita-cnpj data)"),
     ):
         sp = sub.add_parser(cmd, help=helptext)
         sp.add_argument("--db", default="elosys.db")

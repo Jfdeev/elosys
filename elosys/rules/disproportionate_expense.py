@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 from ..log import RowCounter, get_logger, step
 from ..util import git_commit, now_utc
+from .common import reset_rule_signals
 
 log = get_logger("elosys.rules.disproportionate_expense")
 
@@ -146,7 +147,7 @@ def _assess(amount: int, categories: set[str], year: int, office: str | None,
 
 def run(con: sqlite3.Connection) -> dict:
     with step(log, "reset disproportionate_expense signals"):
-        _reset(con)
+        reset_rule_signals(con, RULE_NAME)
 
     where_keywords = " OR ".join("ce.description LIKE ?" for _ in KEYWORDS)
     like_params = [f"%{k}%" for k in KEYWORDS]
@@ -225,27 +226,3 @@ def run(con: sqlite3.Connection) -> dict:
     log.info("done: %s sinais gerados (rule_run %d) — %s",
              f"{generated:,}", rule_run_id, by_severity)
     return {"rule_run_id": rule_run_id, "signals": generated, "by_severity": by_severity}
-
-
-def _reset(con: sqlite3.Connection) -> None:
-    con.execute(
-        "DELETE FROM signal_evidence WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal_actor WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal_ai_review WHERE signal_id IN "
-        "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute(
-        "DELETE FROM signal WHERE rule_run_id IN (SELECT id FROM rule_run WHERE rule = ?)",
-        (RULE_NAME,),
-    )
-    con.execute("DELETE FROM rule_run WHERE rule = ?", (RULE_NAME,))
-    con.commit()
