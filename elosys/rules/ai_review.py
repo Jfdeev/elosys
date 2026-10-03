@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 
-from ..ai.deepseek import DEFAULT_MODEL, DeepSeekError, chat_json
+from ..ai.deepseek import DEFAULT_MODEL, DeepSeekError, chat_json, model_chain
 from ..log import RowCounter, get_logger, step
 from ..util import now_utc
 
@@ -69,7 +69,7 @@ def run(
             log.warning("regra desconhecida, pulando: %s", rule)
             continue
         with step(log, f"{rule}: selecionar sinais (limit {limit}, order {order})"):
-            targets = _select_signals(con, rule, model, limit, refresh, order, min_amount_cents)
+            targets = _select_signals(con, rule, model_chain(model), limit, refresh, order, min_amount_cents)
         log.info("  %s sinais para revisar", len(targets))
 
         rc = RowCounter(log, f"{rule} revisados", every=10)
@@ -102,7 +102,7 @@ def run(
                 "facts=excluded.facts, prompt=excluded.prompt, raw_response=excluded.raw_response, "
                 "tokens_prompt=excluded.tokens_prompt, tokens_completion=excluded.tokens_completion",
                 (
-                    signal_id, model, now_utc(), verdict, confidence, model_explanation,
+                    signal_id, out.get("model", model), now_utc(), verdict, confidence, model_explanation,
                     json.dumps(model_facts, ensure_ascii=False), user_prompt, out["raw"],
                     out["prompt_tokens"], out["completion_tokens"],
                 ),
@@ -128,14 +128,15 @@ def _summary(reviewed: int, by_verdict: dict, errors: int, *, aborted: bool = Fa
 
 
 def _select_signals(
-    con: sqlite3.Connection, rule: str, model: str, limit: int, refresh: bool,
+    con: sqlite3.Connection, rule: str, models: list[str], limit: int, refresh: bool,
     order: str, min_amount_cents: int,
 ) -> list[tuple[int, str]]:
+    marks = ", ".join("?" * len(models))
     if refresh:
         con.execute(
-            "DELETE FROM signal_ai_review WHERE model = ? AND signal_id IN "
+            f"DELETE FROM signal_ai_review WHERE model IN ({marks}) AND signal_id IN "  # noqa: S608
             "(SELECT s.id FROM signal s JOIN rule_run r ON r.id = s.rule_run_id WHERE r.rule = ?)",
-            (model, rule),
+            (*models, rule),
         )
     amount_expr = (
         "coalesce(s.amount_cents, 0)"
@@ -151,10 +152,10 @@ def _select_signals(
     rows = con.execute(
         f"SELECT s.id, s.explanation FROM signal s "  # noqa: S608
         f"JOIN rule_run r ON r.id = s.rule_run_id "
-        f"WHERE r.rule = ? AND s.id NOT IN (SELECT signal_id FROM signal_ai_review WHERE model = ?) "
+        f"WHERE r.rule = ? AND s.id NOT IN (SELECT signal_id FROM signal_ai_review WHERE model IN ({marks})) "
         f"AND {amount_expr} >= ? "
         f"ORDER BY {order_by} LIMIT ?",
-        (rule, model, min_amount_cents, limit),
+        (rule, *models, min_amount_cents, limit),
     ).fetchall()
     return [(r["id"], r["explanation"]) for r in rows]
 

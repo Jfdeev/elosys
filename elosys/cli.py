@@ -322,12 +322,13 @@ def main(argv: list[str] | None = None) -> int:
     pcsp.set_defaults(func=lambda a: _run_rule(a, candidate_supplier_partner, "candidate_supplier_partner"))
 
     par = sub.add_parser("ai-review",
-                         help="LLM (DeepSeek) second opinion on signals: rotineiro vs. bizarro. Needs DEEPSEEK_API_KEY")
+                         help="LLM second opinion on signals: rotineiro vs. bizarro. "
+                              "Needs DEEPSEEK_API_KEY, or LLM_PROVIDER=gemini + GEMINI_API_KEY")
     par.add_argument("--db", default="elosys.db")
     par.add_argument("--limit", type=int, default=ai_review.DEFAULT_LIMIT,
                      help="how many signals PER RULE to review this run, biggest-money first (default: %(default)s)")
     par.add_argument("--rule", help="comma-separated subset of: circular_donations,disproportionate_expense")
-    par.add_argument("--model", default=ai_review.DEFAULT_MODEL, help="DeepSeek model (default: %(default)s)")
+    par.add_argument("--model", default=ai_review.DEFAULT_MODEL, help="LLM model (default: %(default)s)")
     par.add_argument("--order", choices=("amount", "tight"), default="amount",
                      help="'amount' = biggest money first; 'tight' = shortest cycles first (default: %(default)s)")
     par.add_argument("--min-amount-brl", type=float, default=0,

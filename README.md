@@ -162,7 +162,7 @@ uv run elosys candidate-supplier-partner    --db elosys.db   # requer receita-cn
 Exigem chaves de API definidas em variáveis de ambiente. Chaves nunca devem ser versionadas.
 
 ```bash
-export DEEPSEEK_API_KEY=...
+export DEEPSEEK_API_KEY=...                  # ou LLM_PROVIDER=gemini + GEMINI_API_KEY (ver "Revisão por LLM")
 uv run elosys ai-review --db elosys.db --limit 100 --order tight
 
 export APIFY_TOKEN=...
@@ -212,9 +212,11 @@ As tabelas `rule_run`, `signal`, `signal_actor` e `signal_evidence` não provêm
 
 ### Despesa desproporcional (`disproportionate_expense`)
 
-Identifica, em `campaign_expense.description`, itens tipicamente de baixo custo (18 categorias, como canetas, adesivos e crachás) com valores muito acima do padrão da categoria. A severidade é `medium` a partir de 15 vezes a mediana histórica e `high` a partir de 30 vezes, com piso de R$ 1.000. Categorias com menos de 20 registros utilizam pisos fixos de R$ 5 mil e R$ 50 mil.
+Identifica, em `campaign_expense.description`, itens tipicamente de baixo custo (18 categorias, como canetas, adesivos e crachás) com valores muito acima do padrão da categoria. A severidade é `medium` a partir de 15 vezes a mediana e `high` a partir de 30 vezes, com piso de R$ 1.000.
 
-Na base completa, a regra gerou 28.743 sinais (13.856 de severidade alta e 14.887 de severidade média). O maior caso corresponde a R$ 2.504.200,00 em material adesivo, valor 9.879 vezes superior à mediana da categoria (R$ 253,50).
+A mediana é calculada **por categoria, ano e cargo** (por exemplo, "adesivo em Deputado Federal 2022"), e não de forma global: eleições municipais e gerais têm níveis de preço muito diferentes, e uma mediana única faria toda despesa de campanha estadual ou federal parecer inflada. Quando o grupo de cargo tem menos de 20 despesas, usa-se a mediana de categoria e ano. Sem amostra suficiente, aplicam-se pisos fixos de R$ 5 mil (`medium`) e R$ 50 mil (`high`). Descrições que citam mais de uma categoria (por exemplo, "caneta e adesivo") ficam fora do cálculo das medianas e só geram sinal acima dos pisos fixos, porque o valor soma itens diferentes.
+
+Na base completa, a regra (versão 3.0) gerou 13.680 sinais (4.860 de severidade alta e 8.820 de severidade média). O maior caso corresponde a R$ 2.504.200,00 em material adesivo, valor 4.174 vezes superior à mediana de "adesivo" em Prefeito 2024 (R$ 600,00). Na versão anterior, com mediana única por categoria, a regra gerava 28.743 sinais.
 
 O TSE não publica a quantidade adquirida, apenas o valor total; por isso a regra não calcula preço unitário. Um valor elevado pode decorrer de lote grande, descrição incompleta ou erro de digitação. A página `/sinais/despesa-desproporcional` apresenta os maiores gastos por categoria, sua proporção em relação à receita da campanha e a comparação com a média de candidatos ao mesmo cargo e estado.
 
@@ -232,9 +234,24 @@ Na base completa, foram identificados 533 vínculos possíveis, envolvendo R$ 19
 
 ### Revisão por LLM (`ai-review`, opcional)
 
-O módulo `elosys/rules/ai_review.py` submete os fatos de cada sinal de doação circular ou despesa desproporcional a um modelo de linguagem (DeepSeek), que avalia se o caso aparenta ser rotineiro ou atípico. A resposta, a justificativa, os fatos citados e o prompt utilizado são armazenados em `signal_ai_review` (um registro por sinal e modelo), permitindo auditoria humana do raciocínio.
+O módulo `elosys/rules/ai_review.py` submete os fatos de cada sinal de doação circular ou despesa desproporcional a um modelo de linguagem (DeepSeek ou Gemini), que avalia se o caso aparenta ser rotineiro ou atípico. A resposta, a justificativa, os fatos citados e o prompt utilizado são armazenados em `signal_ai_review` (um registro por sinal e modelo), permitindo auditoria humana do raciocínio.
 
-O processo é incremental: novas execuções ampliam a cobertura e `--refresh` reprocessa sinais já avaliados. A ordenação pode priorizar valor (`--order amount`) ou ciclos mais curtos (`--order tight`). A chave de API deve ser fornecida via `DEEPSEEK_API_KEY`. Os resultados estão em `/sinais/analise-ia`. A avaliação do modelo é um elemento auxiliar e também está sujeita a erros.
+O processo é incremental: novas execuções ampliam a cobertura e `--refresh` reprocessa sinais já avaliados. O `--limit` vale por regra. A ordenação pode priorizar valor (`--order amount`) ou ciclos mais curtos (`--order tight`), e `--min-amount-brl` ignora sinais de valor baixo. Os resultados estão em `/sinais/analise-ia`. A avaliação do modelo é um elemento auxiliar e também está sujeita a erros.
+
+**Provedor e chave.** O provedor é escolhido pela variável `LLM_PROVIDER` e a chave vem sempre do ambiente, nunca de arquivo:
+
+| `LLM_PROVIDER` | Chave | Modelos |
+|---|---|---|
+| `deepseek` (padrão) | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, `gemini-3.7-flash`, `gemini-3.8-flash` |
+
+No Gemini, cada modelo tem sua própria cota gratuita (requisições por minuto e por dia). O cliente respeita o intervalo mínimo de cada modelo e, ao receber HTTP 429 (cota esgotada), passa para o próximo da lista. Falhas temporárias do servidor (HTTP 500, 502, 503 e 504) são repetidas uma vez após 5 segundos e, se persistirem, o sinal segue para o próximo modelo, sem marcar o anterior como esgotado. Cada revisão grava o modelo que de fato respondeu, e um sinal já revisado por qualquer modelo da lista não é revisado de novo. Os limites de cota mudam com o plano e o tempo; confira no painel do provedor.
+
+```powershell
+$env:LLM_PROVIDER = "gemini"
+$env:GEMINI_API_KEY = "..."
+uv run elosys ai-review --db elosys.db --limit 50 --order tight
+```
 
 ## Registros de execução e auditoria
 

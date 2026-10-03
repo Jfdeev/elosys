@@ -118,3 +118,46 @@ def test_api_error_is_survived_not_crashed(tmp_path, monkeypatch):
     assert rep["errors"] == 1
     assert con.execute("SELECT count(*) FROM signal_ai_review").fetchone()[0] == 0
     con.close()
+
+
+def test_records_the_model_that_actually_answered(tmp_path, monkeypatch):
+    path = tmp_path / "t.db"
+    create_schema(path)
+    con = connect(path, write=True)
+    _seed_two_node_cycle(con)
+    monkeypatch.setattr(ai_review, "DELAY_SECONDS", 0)
+
+    inner = _fake_chat()
+    monkeypatch.setattr(
+        ai_review, "chat_json",
+        lambda *a, **k: {**inner(*a, **k), "model": "fallback-model"},
+    )
+    ai_review.run(con, limit=10, rules=("circular_donations",))
+
+    assert con.execute("SELECT model FROM signal_ai_review").fetchone()[0] == "fallback-model"
+    con.close()
+
+
+def test_signal_reviewed_by_a_fallback_model_is_not_reviewed_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    path = tmp_path / "t.db"
+    create_schema(path)
+    con = connect(path, write=True)
+    _seed_two_node_cycle(con)
+    monkeypatch.setattr(ai_review, "DELAY_SECONDS", 0)
+
+    calls = []
+    inner = _fake_chat()
+
+    def _chat(*a, **k):
+        calls.append(k["model"])
+        return {**inner(*a, **k), "model": "gemini-3.5-flash-lite"}  # first model was out of quota
+
+    monkeypatch.setattr(ai_review, "chat_json", _chat)
+
+    ai_review.run(con, model="gemini-3.1-flash-lite", limit=10, rules=("circular_donations",))
+    rep2 = ai_review.run(con, model="gemini-3.1-flash-lite", limit=10, rules=("circular_donations",))
+
+    assert rep2["reviewed"] == 0
+    assert calls == ["gemini-3.1-flash-lite"]
+    con.close()

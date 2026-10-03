@@ -6,7 +6,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..ai.deepseek import DEFAULT_MODEL, DeepSeekError, chat_json
+from ..ai.deepseek import DEFAULT_MODEL, DeepSeekError, chat_json, model_chain
 from ..log import RowCounter, get_logger, step
 from ..util import now_utc
 
@@ -67,7 +67,7 @@ def run(
     workers: int = DEFAULT_WORKERS,
 ) -> dict:
     with step(log, f"selecionar posts (limit {limit}, only_matched={only_matched})"):
-        targets = _select_posts(con, model, limit, refresh, only_matched, handles)
+        targets = _select_posts(con, model_chain(model), limit, refresh, only_matched, handles)
     log.info("%d posts para revisar (%d workers)", len(targets), workers)
 
     by_cat: dict[str, int] = {}
@@ -105,7 +105,7 @@ def run(
                 "raw_response=excluded.raw_response, tokens_prompt=excluded.tokens_prompt, "
                 "tokens_completion=excluded.tokens_completion",
                 (
-                    post_id, model, now_utc(), json.dumps(categories, ensure_ascii=False),
+                    post_id, out.get("model", model), now_utc(), json.dumps(categories, ensure_ascii=False),
                     severity, 1 if offensive else 0, quote, explanation, user_prompt, out["raw"],
                     out["prompt_tokens"], out["completion_tokens"],
                 ),
@@ -136,13 +136,14 @@ def _summary(reviewed: int, flagged: int, by_cat: dict, errors: int, *, aborted:
 
 
 def _select_posts(
-    con: sqlite3.Connection, model: str, limit: int, refresh: bool, only_matched: bool,
+    con: sqlite3.Connection, models: list[str], limit: int, refresh: bool, only_matched: bool,
     handles: list[str] | None,
 ) -> list[sqlite3.Row]:
+    marks = ", ".join("?" * len(models))
     if refresh:
-        con.execute("DELETE FROM social_post_review WHERE model = ?", (model,))
-    where = ["p.id NOT IN (SELECT social_post_id FROM social_post_review WHERE model = ?)"]
-    params: list = [model]
+        con.execute(f"DELETE FROM social_post_review WHERE model IN ({marks})", models)  # noqa: S608
+    where = [f"p.id NOT IN (SELECT social_post_id FROM social_post_review WHERE model IN ({marks}))"]
+    params: list = [*models]
     if only_matched:
         where.append("p.matched_terms != '[]'")
     if handles:
