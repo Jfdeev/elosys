@@ -1,10 +1,15 @@
-"""Detection rule: despesa desproporcional — a normally-cheap item billed at"""
+"""Detection rule: despesa desproporcional — a normally-cheap item billed at a value far above
+what the same item usually costs in comparable campaigns (same year and office).
+
+Indício, não prova: the TSE publishes only the total amount, never the quantity bought."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from statistics import median
+from typing import NamedTuple
 
 from ..log import RowCounter, get_logger, step
 from ..util import git_commit, now_utc
@@ -12,7 +17,7 @@ from ..util import git_commit, now_utc
 log = get_logger("elosys.rules.disproportionate_expense")
 
 RULE_NAME = "disproportionate_expense"
-RULE_VERSION = "2.0"
+RULE_VERSION = "3.0"
 
 CATEGORIES: tuple[tuple[str, ...], ...] = (
     ("CANETA",),
@@ -52,14 +57,91 @@ PARAMS = {
     "min_floor_cents": MIN_FLOOR_CENTS,
     "fallback_medium_floor_cents": FALLBACK_MEDIUM_FLOOR_CENTS,
     "fallback_high_floor_cents": FALLBACK_HIGH_FLOOR_CENTS,
+    "reference_scopes": ["category+year+office", "category+year"],
+    "multi_item_policy": "excluded from medians; fixed floors",
 }
 
 
-def _category_for(description: str) -> str | None:
-    for spelling, canonical in CANONICAL_OF.items():
-        if spelling in description:
-            return canonical
-    return None
+class _Reference(NamedTuple):
+    scope: str
+    n: int
+    median_cents: float
+    medium_floor: int
+    high_floor: int
+
+
+def _categories_in(description: str) -> set[str]:
+    """Categories named in a description. Longer spellings are matched first and removed from
+    the text, so "LAPISEIRA" is not also counted as "LAPIS"."""
+    found: set[str] = set()
+    remaining = description
+    for spelling in sorted(CANONICAL_OF, key=len, reverse=True):
+        if spelling in remaining:
+            found.add(CANONICAL_OF[spelling])
+            remaining = remaining.replace(spelling, " ")
+    return found
+
+
+def _scope_label(key: tuple) -> str:
+    _, year, office = key
+    return f"{office} {year}" if office is not None else f"eleição de {year}"
+
+
+def _build_references(single_item_rows: list[tuple[sqlite3.Row, str]]) -> dict[tuple, _Reference]:
+    """Median per (category, year, office) and per (category, year), only where the sample is
+    big enough. Municipal and general elections have very different price levels, so one
+    pooled median would make every state/federal expense look inflated."""
+    amounts: dict[tuple, list[int]] = defaultdict(list)
+    for r, category in single_item_rows:
+        amount = r["amount_cents"] or 0
+        amounts[(category, r["year"], None)].append(amount)
+        if r["office"] is not None:
+            amounts[(category, r["year"], r["office"])].append(amount)
+
+    references = {}
+    for key, values in amounts.items():
+        if len(values) < MIN_SAMPLE_FOR_STATS:
+            continue
+        med = median(values)
+        references[key] = _Reference(
+            scope=_scope_label(key), n=len(values), median_cents=med,
+            medium_floor=max(MIN_FLOOR_CENTS, round(med * MEDIAN_MULTIPLIER_MEDIUM)),
+            high_floor=max(MIN_FLOOR_CENTS, round(med * MEDIAN_MULTIPLIER_HIGH)),
+        )
+    return references
+
+
+def _reference_for(references: dict[tuple, _Reference], category: str, year: int,
+                   office: str | None) -> _Reference | None:
+    return references.get((category, year, office)) or references.get((category, year, None))
+
+
+def _assess(amount: int, categories: set[str], year: int, office: str | None,
+            references: dict[tuple, _Reference]) -> tuple[str, str] | None:
+    """(severity, basis text) when the amount is flagged, else None."""
+    category = next(iter(categories))
+    reference = _reference_for(references, category, year, office) if len(categories) == 1 else None
+
+    if reference is None:
+        if amount < FALLBACK_MEDIUM_FLOOR_CENTS:
+            return None
+        severity = "high" if amount >= FALLBACK_HIGH_FLOOR_CENTS else "medium"
+        if len(categories) > 1:
+            items = ", ".join(sorted(c.lower() for c in categories))
+            return severity, (f"descrição com vários itens baratos ({items}), "
+                              "sem comparação com a mediana — piso fixo aplicado")
+        return severity, (f'categoria "{category.lower()}" com poucas despesas '
+                          f"comparáveis em {year} — piso fixo aplicado")
+
+    if amount < reference.medium_floor:
+        return None
+    severity = "high" if amount >= reference.high_floor else "medium"
+    if not reference.median_cents:
+        return severity, "categoria sem mediana estável"
+    return severity, (
+        f"{amount / reference.median_cents:.0f}x a mediana de R$ {reference.median_cents / 100:,.2f} "
+        f'pra "{category.lower()}" em {reference.scope} ({reference.n:,} despesas comparáveis)'
+    )
 
 
 def run(con: sqlite3.Connection) -> dict:
@@ -72,41 +154,18 @@ def run(con: sqlite3.Connection) -> dict:
         rows = con.execute(
             "SELECT ce.id, ce.amount_cents, ce.description, ce.year, ce.cnpj, "
             "       ce.supplier_name, ce.supplier_company_id, ce.supplier_person_id, "
-            "       co.person_id AS candidate_person_id "
+            "       co.person_id AS candidate_person_id, co.office AS office "
             "FROM campaign_expense ce "
             "LEFT JOIN campaign_org co ON co.id = ce.campaign_org_id "
             f"WHERE ({where_keywords})",  # noqa: S608
             like_params,
         ).fetchall()
 
-    by_category: dict[str, list[sqlite3.Row]] = {}
-    for r in rows:
-        cat = _category_for(r["description"])
-        if cat is None:
-            continue
-        by_category.setdefault(cat, []).append(r)
-
-    category_stats: dict[str, dict] = {}
-    for cat, cat_rows in by_category.items():
-        amounts = sorted(r["amount_cents"] or 0 for r in cat_rows)
-        n = len(amounts)
-        if n >= MIN_SAMPLE_FOR_STATS:
-            med = median(amounts)
-            medium_floor = max(MIN_FLOOR_CENTS, round(med * MEDIAN_MULTIPLIER_MEDIUM))
-            high_floor = max(MIN_FLOOR_CENTS, round(med * MEDIAN_MULTIPLIER_HIGH))
-        else:
-            med = None
-            medium_floor = FALLBACK_MEDIUM_FLOOR_CENTS
-            high_floor = FALLBACK_HIGH_FLOOR_CENTS
-        category_stats[cat] = {
-            "n": n, "median_cents": med, "medium_floor": medium_floor, "high_floor": high_floor,
-        }
-        log.info(
-            "  %-20s n=%6s median=%s medium>=R$%.2f high>=R$%.2f",
-            cat, f"{n:,}",
-            f"R${med / 100:,.2f}" if med is not None else "n/d (fallback floors)",
-            medium_floor / 100, high_floor / 100,
-        )
+    classified = [(r, cats) for r in rows if (cats := _categories_in(r["description"]))]
+    single_item = [(r, next(iter(cats))) for r, cats in classified if len(cats) == 1]
+    references = _build_references(single_item)
+    log.info("  %s single-item expenses, %s multi-item (fixed floors), %s reference medians",
+             f"{len(single_item):,}", f"{len(classified) - len(single_item):,}", f"{len(references):,}")
 
     cur = con.execute(
         "INSERT INTO rule_run (rule, rule_version, code_commit, params, run_at, rows_generated) "
@@ -117,26 +176,13 @@ def run(con: sqlite3.Connection) -> dict:
 
     rc = RowCounter(log, "candidate expenses scanned", every=50_000)
     generated = 0
-    for r in rows:
+    for r, cats in classified:
         rc.tick()
-        cat = _category_for(r["description"])
-        if cat is None:
-            continue
-        stats = category_stats[cat]
         amount = r["amount_cents"] or 0
-        if amount < stats["medium_floor"]:
+        assessment = _assess(amount, cats, r["year"], r["office"], references)
+        if assessment is None:
             continue
-        severity = "high" if amount >= stats["high_floor"] else "medium"
-
-        if stats["median_cents"] is not None:
-            times_median = amount / stats["median_cents"] if stats["median_cents"] else None
-            basis = (
-                f"{times_median:.0f}x a mediana de R$ {stats['median_cents'] / 100:,.2f} "
-                f"pra \"{cat.lower()}\" ({stats['n']:,} despesas nessa categoria no histórico)"
-                if times_median is not None else "categoria sem mediana estável"
-            )
-        else:
-            basis = f"categoria \"{cat.lower()}\" com poucas despesas no histórico ({stats['n']}) — piso fixo aplicado"
+        severity, basis = assessment
 
         explanation = (
             f"Despesa de campanha de R$ {amount / 100:,.2f} descrita como "

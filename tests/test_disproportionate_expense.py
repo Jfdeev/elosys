@@ -28,13 +28,32 @@ def _seed_common(con):
     return pid, company_id, org_id
 
 
-def _insert_expense(con, org_id, company_id, description, amount_cents, expense_id):
+def _insert_expense(con, org_id, company_id, description, amount_cents, expense_id, year=2022):
     con.execute(
         "INSERT INTO campaign_expense (campaign_org_id, cnpj, tse_candidacy_id, year, "
         "tse_expense_id, description, amount_cents, supplier_company_id, "
         "provenance_id, collected_at) "
-        "VALUES (?, '40430149000110', '250001', 2022, ?, ?, ?, ?, 1, ?)",
-        (org_id, expense_id, description, amount_cents, company_id, T))
+        "VALUES (?, '40430149000110', '250001', ?, ?, ?, ?, ?, 1, ?)",
+        (org_id, year, expense_id, description, amount_cents, company_id, T))
+
+
+def _add_org(con, company_id, year, office, candidacy_id):
+    cur = con.execute(
+        "INSERT INTO campaign_org (company_id, cnpj, tse_candidacy_id, year, office, "
+        "provenance_id, collected_at) VALUES (?, '40430149000110', ?, ?, ?, 1, ?)",
+        (company_id, candidacy_id, year, office, T))
+    return cur.lastrowid
+
+
+def _flagged(con):
+    """{tse_expense_id: (severity, explanation)} for every signal."""
+    return {
+        r["tse_expense_id"]: (r["severity"], r["explanation"])
+        for r in con.execute(
+            "SELECT ce.tse_expense_id, s.severity, s.explanation FROM signal s "
+            "JOIN signal_evidence se ON se.signal_id = s.id "
+            "JOIN campaign_expense ce ON ce.id = se.record_id")
+    }
 
 
 def test_flags_cheap_item_over_threshold(tmp_path):
@@ -157,3 +176,78 @@ def test_never_uses_forbidden_severity_language(tmp_path):
     for banned in ("CONFIRMADO", "CULPADO", "CRIME", "FRAUDE"):
         assert banned not in explanations.upper()
     con.close()
+
+
+def test_median_is_computed_per_year_and_office(tmp_path):
+    path = tmp_path / "t.db"
+    create_schema(path)
+    con = connect(path, write=True)
+    _, company_id, _ = _seed_common(con)
+    vereador = _add_org(con, company_id, 2020, "Vereador", "v1")
+    deputado = _add_org(con, company_id, 2022, "Deputado Federal", "d1")
+
+    for i in range(100):
+        _insert_expense(con, vereador, company_id, "ADESIVO", 10_000, f"v-{i}", year=2020)
+    for i in range(20):
+        _insert_expense(con, deputado, company_id, "ADESIVO", 200_000, f"d-{i}", year=2022)
+    _insert_expense(con, vereador, company_id, "ADESIVO", 500_000, "v-outlier", year=2020)
+    con.commit()
+
+    rule.run(con)
+    flagged = _flagged(con)
+
+    # Under one pooled median (10k) the typical federal-deputy sticker (200k) would be flagged.
+    assert not any(k.startswith("d-") for k in flagged)
+    severity, explanation = flagged["v-outlier"]
+    assert severity == "high"
+    assert "Vereador 2020" in explanation
+    con.close()
+
+
+def test_small_office_group_falls_back_to_year_median(tmp_path):
+    path = tmp_path / "t.db"
+    create_schema(path)
+    con = connect(path, write=True)
+    _, company_id, _ = _seed_common(con)
+    prefeito = _add_org(con, company_id, 2022, "Prefeito", "p1")
+    senador = _add_org(con, company_id, 2022, "Senador", "s1")
+
+    for i in range(20):
+        _insert_expense(con, prefeito, company_id, "ADESIVO", 10_000, f"p-{i}")
+    _insert_expense(con, senador, company_id, "ADESIVO", 200_000, "s-outlier")
+    con.commit()
+
+    rule.run(con)
+    severity, explanation = _flagged(con)["s-outlier"]
+    assert severity == "medium"
+    assert "eleição de 2022" in explanation
+    con.close()
+
+
+def test_multi_item_descriptions_do_not_pollute_the_median(tmp_path):
+    path = tmp_path / "t.db"
+    create_schema(path)
+    con = connect(path, write=True)
+    _, company_id, org_id = _seed_common(con)
+
+    for i in range(20):
+        _insert_expense(con, org_id, company_id, "CANETA", 10_000, f"c-{i}")
+    for i in range(30):
+        _insert_expense(con, org_id, company_id, "CANETA E ADESIVO", 1_000_000, f"bundle-{i}")
+    _insert_expense(con, org_id, company_id, "CANETA", 200_000, "c-outlier")
+    con.commit()
+
+    rule.run(con)
+    flagged = _flagged(con)
+
+    assert "20x a mediana" in flagged["c-outlier"][1]
+    assert all(flagged[f"bundle-{i}"][0] == "medium" for i in range(30))
+    assert "vários itens" in flagged["bundle-0"][1]
+    con.close()
+
+
+def test_categories_in_counts_an_item_once():
+    assert rule._categories_in("LAPISEIRA 0.7") == {"LAPISEIRA"}
+    assert rule._categories_in("LAPIS E LAPISEIRA") == {"LAPIS", "LAPISEIRA"}
+    assert rule._categories_in("CANETA E ADESIVO") == {"CANETA", "ADESIVO"}
+    assert rule._categories_in("LOCACAO DE VEICULO") == set()

@@ -1,8 +1,8 @@
 {
-  "rule_run_id": 3,
-  "signals": 28743,
+  "rule_run_id": 5,
+  "signals": 13680,
   "by_severity": {
-    "high": 13856,
-    "medium": 14887
+    "high": 4860,
+    "medium": 8820
   }
 }
